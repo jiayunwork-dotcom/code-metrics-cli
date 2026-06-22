@@ -94,8 +94,8 @@ func AnalyzeContributors(repoPath string, opts *models.AnalyzerOptions) *models.
 
 	since := getSinceTime(opts)
 
-	cmd := exec.Command("git", "log", "--numstat", "--pretty=format:%H%n%an%n%ae%n%ct",
-		"--since="+since, "--follow", "-M")
+	cmd := exec.Command("git", "log", "--numstat", "--pretty=format:---COMMIT---%H%n---AUTHOR---%an%n---EMAIL---%ae",
+		"--since="+since, "-M")
 	cmd.Dir = repoPath
 
 	output, err := cmd.Output()
@@ -118,33 +118,22 @@ func AnalyzeContributors(repoPath string, opts *models.AnalyzerOptions) *models.
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var currentAuthor *contrib
-	skipNext := 0
 
 	for scanner.Scan() {
-		if skipNext > 0 {
-			skipNext--
-			continue
-		}
-
 		line := scanner.Text()
-		if line == "" {
-			continue
-		}
 
-		if _, err := strconv.ParseInt(line, 16, 64); err == nil && len(line) >= 40 {
+		if strings.HasPrefix(line, "---COMMIT---") {
 			if !scanner.Scan() {
 				break
 			}
-			name := scanner.Text()
+			nameLine := scanner.Text()
+			name := strings.TrimPrefix(nameLine, "---AUTHOR---")
 
 			if !scanner.Scan() {
 				break
 			}
-			email := scanner.Text()
-
-			if !scanner.Scan() {
-				break
-			}
+			emailLine := scanner.Text()
+			email := strings.TrimPrefix(emailLine, "---EMAIL---")
 
 			key := email
 			if c, ok := contribMap[key]; ok {
@@ -160,6 +149,10 @@ func AnalyzeContributors(repoPath string, opts *models.AnalyzerOptions) *models.
 				contribMap[key] = c
 				currentAuthor = c
 			}
+			continue
+		}
+
+		if line == "" {
 			continue
 		}
 
@@ -242,8 +235,8 @@ func getSinceTime(opts *models.AnalyzerOptions) string {
 }
 
 func parseGitLog(repoPath string, since string, fileMap map[string]*fileStats) error {
-	cmd := exec.Command("git", "log", "--numstat", "--pretty=format:COMMIT %H",
-		"--since="+since, "--follow", "-M", "-C")
+	cmd := exec.Command("git", "log", "--numstat", "--pretty=format:---COMMIT---%H",
+		"--since="+since, "-M", "-C")
 	cmd.Dir = repoPath
 
 	output, err := cmd.Output()
@@ -259,7 +252,7 @@ func parseGitLog(repoPath string, since string, fileMap map[string]*fileStats) e
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		if strings.HasPrefix(line, "COMMIT") {
+		if strings.HasPrefix(line, "---COMMIT---") {
 			continue
 		}
 

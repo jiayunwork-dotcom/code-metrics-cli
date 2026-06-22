@@ -139,12 +139,66 @@ func parseImports(file string, lang utils.Language, repoPath, relPath string) []
 	scanner := bufio.NewScanner(content)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	importRegexes := getImportRegex(lang)
+	inImportBlock := false
+	inMultiLineComment := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		imp := matchImport(line, importRegexes, lang, file, repoPath, relPath)
-		if imp != "" {
+		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "" {
+			continue
+		}
+
+		if inMultiLineComment {
+			if strings.Contains(line, "*/") {
+				inMultiLineComment = false
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "/*") {
+			if !strings.Contains(trimmed, "*/") {
+				inMultiLineComment = true
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+
+		if lang == utils.LangGo {
+			if strings.HasPrefix(trimmed, "import (") {
+				inImportBlock = true
+				continue
+			}
+			if inImportBlock {
+				if strings.HasPrefix(trimmed, ")") {
+					inImportBlock = false
+					continue
+				}
+				re := regexp.MustCompile(`^\s*"([^"]+)"`)
+				if m := re.FindStringSubmatch(line); m != nil && len(m) >= 2 {
+					imp := resolveImportPath(m[1], lang, file, repoPath, relPath)
+					if isValidImport(imp) {
+						imports = append(imports, imp)
+					}
+					continue
+				}
+			}
+			re := regexp.MustCompile(`^\s*import\s+"([^"]+)"`)
+			if m := re.FindStringSubmatch(line); m != nil && len(m) >= 2 {
+				imp := resolveImportPath(m[1], lang, file, repoPath, relPath)
+				if isValidImport(imp) {
+					imports = append(imports, imp)
+				}
+			}
+			continue
+		}
+
+		imp := matchImport(line, lang, file, repoPath, relPath)
+		if imp != "" && isValidImport(imp) {
 			imports = append(imports, imp)
 		}
 	}
@@ -152,43 +206,77 @@ func parseImports(file string, lang utils.Language, repoPath, relPath string) []
 	return imports
 }
 
-func getImportRegex(lang utils.Language) []*regexp.Regexp {
-	var regexes []*regexp.Regexp
-
-	switch lang {
-	case utils.LangGo:
-		regexes = append(regexes, regexp.MustCompile(`^\s*import\s+"([^"]+)"`))
-		regexes = append(regexes, regexp.MustCompile(`^\s*"([^"]+)"`))
-	case utils.LangPython:
-		regexes = append(regexes, regexp.MustCompile(`^\s*import\s+([\w\.]+)`))
-		regexes = append(regexes, regexp.MustCompile(`^\s*from\s+([\w\.]+)\s+import`))
-	case utils.LangJavaScript, utils.LangTypeScript:
-		regexes = append(regexes, regexp.MustCompile(`^\s*import\s+(?:.+\s+from\s+)?['"]([^'"]+)['"]`))
-		regexes = append(regexes, regexp.MustCompile(`^\s*const\s+\w+\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)`))
-		regexes = append(regexes, regexp.MustCompile(`^\s*var\s+\w+\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)`))
-		regexes = append(regexes, regexp.MustCompile(`^\s*import\s*\(\s*['"]([^'"]+)['"]`))
-	case utils.LangJava:
-		regexes = append(regexes, regexp.MustCompile(`^\s*import\s+([\w\.]+);`))
-	case utils.LangRust:
-		regexes = append(regexes, regexp.MustCompile(`^\s*use\s+([\w:]+);`))
-	case utils.LangC, utils.LangCpp:
-		regexes = append(regexes, regexp.MustCompile(`^\s*#\s*include\s+[<"]([^>"]+)[>"]`))
+func isValidImport(imp string) bool {
+	if imp == "" {
+		return false
 	}
 
-	return regexes
+	invalidPatterns := []string{
+		".go", ".py", ".js", ".ts", ".java", ".rs", ".c", ".cpp", ".h", ".hpp",
+		"node_modules", "vendor", "dist", "build", "target",
+		"简单", "中等", "复杂", "极高风险",
+		"健康", "轻微", "严重", "危险",
+		"code_lines", "comment_lines", "blank_lines", "file_count",
+		"A级", "B级", "C级", "D级", "F级",
+	}
+
+	for _, p := range invalidPatterns {
+		if imp == p {
+			return false
+		}
+	}
+
+	if len(imp) < 3 {
+		return false
+	}
+
+	if regexp.MustCompile(`^[+\-*/%=<>!&|^~]+$`).MatchString(imp) {
+		return false
+	}
+
+	if regexp.MustCompile(`^\d+$`).MatchString(imp) {
+		return false
+	}
+
+	return true
 }
 
-func matchImport(line string, regexes []*regexp.Regexp, lang utils.Language, file, repoPath, relPath string) string {
+func matchImport(line string, lang utils.Language, file, repoPath, relPath string) string {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+	if trimmed == "" {
 		return ""
 	}
 
-	if strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
-		return ""
+	var re *regexp.Regexp
+
+	switch lang {
+	case utils.LangPython:
+		if strings.HasPrefix(trimmed, "import ") {
+			re = regexp.MustCompile(`^\s*import\s+([\w\.]+)`)
+		} else if strings.HasPrefix(trimmed, "from ") {
+			re = regexp.MustCompile(`^\s*from\s+([\w\.]+)\s+import`)
+		}
+	case utils.LangJavaScript, utils.LangTypeScript:
+		if strings.HasPrefix(trimmed, "import ") {
+			re = regexp.MustCompile(`^\s*import\s+(?:.+\s+from\s+)?['"]([^'"]+)['"]`)
+		} else if strings.Contains(trimmed, "require(") {
+			re = regexp.MustCompile(`^\s*(?:const|var|let)\s+\w+\s*=\s*require\s*\(\s*['"]([^'"]+)['"]\s*\)`)
+		}
+	case utils.LangJava:
+		if strings.HasPrefix(trimmed, "import ") {
+			re = regexp.MustCompile(`^\s*import\s+([\w\.]+);`)
+		}
+	case utils.LangRust:
+		if strings.HasPrefix(trimmed, "use ") {
+			re = regexp.MustCompile(`^\s*use\s+([\w:]+);`)
+		}
+	case utils.LangC, utils.LangCpp:
+		if strings.HasPrefix(trimmed, "#include") {
+			re = regexp.MustCompile(`^\s*#\s*include\s+[<"]([^>"]+)[>"]`)
+		}
 	}
 
-	for _, re := range regexes {
+	if re != nil {
 		if m := re.FindStringSubmatch(line); m != nil && len(m) >= 2 {
 			return resolveImportPath(m[1], lang, file, repoPath, relPath)
 		}
