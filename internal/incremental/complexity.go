@@ -1,0 +1,565 @@
+package incremental
+
+import (
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/code-metrics/cli/internal/git"
+	"github.com/code-metrics/cli/pkg/models"
+	"github.com/code-metrics/cli/pkg/utils"
+)
+
+type funcInfo struct {
+	name      string
+	startLine int
+	endLine   int
+	body      string
+}
+
+type analyzedFunc struct {
+	name       string
+	startLine  int
+	endLine    int
+	complexity int
+}
+
+func AnalyzeComplexityDiff(changedFiles []models.ChangedFile, opts *models.AnalyzerOptions) *models.ComplexityDiffReport {
+	if len(changedFiles) == 0 {
+		return &models.ComplexityDiffReport{}
+	}
+
+	pool := utils.NewWorkerPool(opts.Jobs)
+	defer pool.Close()
+
+	mu := sync.Mutex{}
+	var fileDiffs []models.FileComplexityDiff
+	totalDiff := 0
+	improvedCount := 0
+	degradedCount := 0
+	newHighRiskCount := 0
+
+	for _, cf := range changedFiles {
+		cf := cf
+		pool.Submit(func() {
+			fileDiff := analyzeFileComplexityDiff(cf, opts)
+			if fileDiff == nil {
+				return
+			}
+
+			mu.Lock()
+			fileDiffs = append(fileDiffs, *fileDiff)
+			totalDiff += fileDiff.Diff
+			if fileDiff.Diff < 0 {
+				improvedCount++
+			} else if fileDiff.Diff > 0 {
+				degradedCount++
+			}
+			newHighRiskCount += len(fileDiff.NewHighRisk)
+			mu.Unlock()
+		})
+	}
+
+	pool.Wait()
+
+	sort.Slice(fileDiffs, func(i, j int) bool {
+		return fileDiffs[i].Diff > fileDiffs[j].Diff
+	})
+
+	return &models.ComplexityDiffReport{
+		TotalDiff:        totalDiff,
+		ChangedFiles:     len(fileDiffs),
+		ImprovedFiles:    improvedCount,
+		DegradedFiles:    degradedCount,
+		FileDiffs:        fileDiffs,
+		NewHighRiskCount: newHighRiskCount,
+	}
+}
+
+func analyzeFileComplexityDiff(cf models.ChangedFile, opts *models.AnalyzerOptions) *models.FileComplexityDiff {
+	lang := utils.GetLanguageByExt(cf.FilePath)
+	if lang != utils.LangGo && lang != utils.LangPython &&
+		lang != utils.LangJavaScript && lang != utils.LangTypeScript &&
+		lang != utils.LangJava && lang != utils.LangRust &&
+		lang != utils.LangC && lang != utils.LangCpp {
+		return nil
+	}
+
+	oldContent := ""
+	oldPath := cf.FilePath
+	if cf.OldPath != "" {
+		oldPath = cf.OldPath
+	}
+
+	if cf.ChangeType != "added" {
+		content, err := git.GetFileContent(opts.RepoPath, opts.DiffCommit1, oldPath)
+		if err == nil {
+			oldContent = content
+		}
+	}
+
+	newContent, err := git.GetFileContent(opts.RepoPath, opts.DiffCommit2, cf.FilePath)
+	if err != nil {
+		return nil
+	}
+
+	oldFuncs := analyzeContent(oldContent, lang)
+	newFuncs := analyzeContent(newContent, lang)
+
+	oldComplexity := sumComplexity(oldFuncs)
+	newComplexity := sumComplexity(newFuncs)
+	diff := newComplexity - oldComplexity
+
+	oldFuncMap := make(map[string]int)
+	for _, f := range oldFuncs {
+		oldFuncMap[f.name] = f.complexity
+	}
+
+	var newHighRisk []models.FunctionComplexity
+	for _, f := range newFuncs {
+		oldC, exists := oldFuncMap[f.name]
+		if (!exists || oldC <= 20) && f.complexity > 20 {
+			newHighRisk = append(newHighRisk, models.FunctionComplexity{
+				FilePath:     cf.FilePath,
+				FunctionName: f.name,
+				Complexity:   f.complexity,
+				Level:        utils.GetComplexityLevel(f.complexity),
+			})
+		}
+	}
+
+	oldFuncList := convertToModel(oldFuncs, cf.FilePath)
+	newFuncList := convertToModel(newFuncs, cf.FilePath)
+
+	return &models.FileComplexityDiff{
+		FilePath:      cf.FilePath,
+		OldComplexity: oldComplexity,
+		NewComplexity: newComplexity,
+		Diff:          diff,
+		OldFunctions:  oldFuncList,
+		NewFunctions:  newFuncList,
+		NewHighRisk:   newHighRisk,
+	}
+}
+
+func analyzeContent(content string, lang utils.Language) []analyzedFunc {
+	if content == "" {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	funcs := extractFunctions(lines, lang)
+
+	var results []analyzedFunc
+	for _, f := range funcs {
+		complexity := calculateComplexity(f.body)
+		results = append(results, analyzedFunc{
+			name:       f.name,
+			startLine:  f.startLine,
+			endLine:    f.endLine,
+			complexity: complexity,
+		})
+	}
+
+	return results
+}
+
+func sumComplexity(funcs []analyzedFunc) int {
+	total := 0
+	for _, f := range funcs {
+		total += f.complexity
+	}
+	return total
+}
+
+func convertToModel(funcs []analyzedFunc, filePath string) []models.FunctionComplexity {
+	var result []models.FunctionComplexity
+	for _, f := range funcs {
+		result = append(result, models.FunctionComplexity{
+			FilePath:     filePath,
+			FunctionName: f.name,
+			Complexity:   f.complexity,
+			Level:        utils.GetComplexityLevel(f.complexity),
+		})
+	}
+	return result
+}
+
+func extractFunctions(lines []string, lang utils.Language) []funcInfo {
+	switch lang {
+	case utils.LangGo:
+		return extractGoFunctions(lines)
+	case utils.LangPython:
+		return extractPythonFunctions(lines)
+	case utils.LangJavaScript, utils.LangTypeScript:
+		return extractJSFunctions(lines)
+	case utils.LangJava:
+		return extractJavaFunctions(lines)
+	case utils.LangRust:
+		return extractRustFunctions(lines)
+	case utils.LangC, utils.LangCpp:
+		return extractCFunctions(lines)
+	default:
+		return nil
+	}
+}
+
+func extractGoFunctions(lines []string) []funcInfo {
+	var funcs []funcInfo
+	funcRegex := regexp.MustCompile(`^func\s+(?:\([^)]+\)\s*)?(\w+)\s*\(`)
+	methodRegex := regexp.MustCompile(`^func\s+\([^)]+\)\s*(\w+)\s*\(`)
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "func ") {
+			var name string
+			if m := methodRegex.FindStringSubmatch(line); m != nil {
+				name = "(method) " + m[1]
+			} else if m := funcRegex.FindStringSubmatch(line); m != nil {
+				name = m[1]
+			} else {
+				continue
+			}
+
+			startLine := i + 1
+			body, endLine := extractBraceBlock(lines, i)
+			if body != "" {
+				funcs = append(funcs, funcInfo{
+					name:      name,
+					startLine: startLine,
+					endLine:   endLine,
+					body:      body,
+				})
+				i = endLine - 1
+			}
+		}
+	}
+	return funcs
+}
+
+func extractPythonFunctions(lines []string) []funcInfo {
+	var funcs []funcInfo
+	defRegex := regexp.MustCompile(`^(def\s+|async\s+def\s+)(\w+)\s*\(`)
+	classRegex := regexp.MustCompile(`^class\s+\w+`)
+
+	currentClass := ""
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+
+		if m := classRegex.FindStringSubmatch(trimmed); m != nil {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) > 0 {
+				className := strings.TrimSpace(strings.TrimSuffix(parts[0], ":"))
+				className = strings.Replace(className, "class ", "", 1)
+				className = strings.TrimSpace(strings.Split(className, "(")[0])
+				currentClass = className + "."
+			}
+			continue
+		}
+
+		if indent == 0 && trimmed != "" && !strings.HasPrefix(trimmed, "class") && !strings.HasPrefix(trimmed, "def") {
+			currentClass = ""
+		}
+
+		if m := defRegex.FindStringSubmatch(trimmed); m != nil {
+			name := currentClass + m[2]
+			startLine := i + 1
+
+			endLine := i
+			funcIndent := indent
+			for j := i + 1; j < len(lines); j++ {
+				nextLine := lines[j]
+				nextTrimmed := strings.TrimSpace(nextLine)
+				if nextTrimmed == "" {
+					continue
+				}
+				nextIndent := len(nextLine) - len(strings.TrimLeft(nextLine, " \t"))
+				if nextIndent <= funcIndent && !strings.HasPrefix(nextTrimmed, "#") {
+					endLine = j
+					break
+				}
+				endLine = j + 1
+			}
+
+			var bodyLines []string
+			for j := i; j < endLine; j++ {
+				bodyLines = append(bodyLines, lines[j])
+			}
+			body := strings.Join(bodyLines, "\n")
+
+			funcs = append(funcs, funcInfo{
+				name:      name,
+				startLine: startLine,
+				endLine:   endLine,
+				body:      body,
+			})
+			i = endLine - 1
+		}
+	}
+	return funcs
+}
+
+func extractJSFunctions(lines []string) []funcInfo {
+	var funcs []funcInfo
+	funcRegex := regexp.MustCompile(`(?:^|\s)(function\s+)(\w+)\s*\(`)
+	arrowRegex := regexp.MustCompile(`(?:const|let|var)?\s*(\w+)\s*[:=]\s*(?:async\s+)?\([^)]*\)\s*=>`)
+	methodRegex := regexp.MustCompile(`^\s*(\w+)\s*\([^)]*\)\s*\{`)
+	classMethodRegex := regexp.MustCompile(`^\s*(?:static\s+)?(\w+)\s*\([^)]*\)\s*\{`)
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		var name string
+		var found bool
+
+		if m := funcRegex.FindStringSubmatch(trimmed); m != nil {
+			name = m[2]
+			found = true
+		} else if m := arrowRegex.FindStringSubmatch(trimmed); m != nil {
+			name = m[1] + " (arrow)"
+			found = true
+		} else if m := classMethodRegex.FindStringSubmatch(trimmed); m != nil &&
+			!strings.HasPrefix(trimmed, "if") && !strings.HasPrefix(trimmed, "for") &&
+			!strings.HasPrefix(trimmed, "while") && !strings.HasPrefix(trimmed, "switch") {
+			name = m[1] + " (method)"
+			found = true
+		} else if m := methodRegex.FindStringSubmatch(trimmed); m != nil &&
+			!strings.HasPrefix(trimmed, "if") && !strings.HasPrefix(trimmed, "for") &&
+			!strings.HasPrefix(trimmed, "while") && !strings.HasPrefix(trimmed, "switch") &&
+			!strings.HasPrefix(trimmed, "function") {
+			name = m[1]
+			found = true
+		}
+
+		if found && name != "" {
+			startLine := i + 1
+			body, endLine := extractBraceBlock(lines, i)
+			if body != "" {
+				funcs = append(funcs, funcInfo{
+					name:      name,
+					startLine: startLine,
+					endLine:   endLine,
+					body:      body,
+				})
+				i = endLine - 1
+			}
+		}
+	}
+	return funcs
+}
+
+func extractJavaFunctions(lines []string) []funcInfo {
+	var funcs []funcInfo
+	methodRegex := regexp.MustCompile(`(?:public|private|protected|static|final|abstract|synchronized|\s)+\s+(?:<[^>]+>\s+)?(?:[\w<>\[\]]+)\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{`)
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if m := methodRegex.FindStringSubmatch(line); m != nil {
+			name := m[1]
+			startLine := i + 1
+			body, endLine := extractBraceBlock(lines, i)
+			if body != "" {
+				funcs = append(funcs, funcInfo{
+					name:      name,
+					startLine: startLine,
+					endLine:   endLine,
+					body:      body,
+				})
+				i = endLine - 1
+			}
+		}
+	}
+	return funcs
+}
+
+func extractRustFunctions(lines []string) []funcInfo {
+	var funcs []funcInfo
+	fnRegex := regexp.MustCompile(`^fn\s+(\w+)\s*\(`)
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if m := fnRegex.FindStringSubmatch(line); m != nil {
+			name := m[1]
+			startLine := i + 1
+			body, endLine := extractBraceBlock(lines, i)
+			if body != "" {
+				funcs = append(funcs, funcInfo{
+					name:      name,
+					startLine: startLine,
+					endLine:   endLine,
+					body:      body,
+				})
+				i = endLine - 1
+			}
+		}
+	}
+	return funcs
+}
+
+func extractCFunctions(lines []string) []funcInfo {
+	var funcs []funcInfo
+	funcRegex := regexp.MustCompile(`^(?:[\w\s\*]+?)\s+(\w+)\s*\([^)]*\)\s*\{`)
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(line, "{") && !strings.HasPrefix(line, "if") &&
+			!strings.HasPrefix(line, "for") && !strings.HasPrefix(line, "while") &&
+			!strings.HasPrefix(line, "switch") && !strings.HasPrefix(line, "else") &&
+			!strings.HasPrefix(line, "struct") && !strings.HasPrefix(line, "class") &&
+			!strings.HasPrefix(line, "enum") && !strings.HasPrefix(line, "typedef") {
+
+			if m := funcRegex.FindStringSubmatch(line); m != nil {
+				name := m[1]
+				startLine := i + 1
+				body, endLine := extractBraceBlock(lines, i)
+				if body != "" {
+					funcs = append(funcs, funcInfo{
+						name:      name,
+						startLine: startLine,
+						endLine:   endLine,
+						body:      body,
+					})
+					i = endLine - 1
+				}
+			}
+		}
+	}
+	return funcs
+}
+
+func extractBraceBlock(lines []string, startIdx int) (string, int) {
+	depth := 0
+	foundBrace := false
+	var body []string
+
+	for i := startIdx; i < len(lines); i++ {
+		line := lines[i]
+		body = append(body, line)
+
+		for _, ch := range line {
+			if ch == '{' {
+				depth++
+				foundBrace = true
+			} else if ch == '}' {
+				depth--
+			}
+		}
+
+		if foundBrace && depth == 0 {
+			return strings.Join(body, "\n"), i + 1
+		}
+	}
+
+	return "", len(lines)
+}
+
+func calculateComplexity(body string) int {
+	complexity := 1
+
+	body = removeStringsAndComments(body)
+
+	keywords := []string{
+		`\bif\b`, `\bfor\b`, `\bwhile\b`, `\bswitch\b`, `\bcase\b`,
+		`\bcatch\b`, `\bthrow\b`, `\b&&`, `\|\|`,
+		`\belse\s+if\b`, `\belse\b`,
+		`\btry\b`, `\bexcept\b`, `\bfinally\b`,
+		`\bdo\b`, `\?\s*[^:]`,
+	}
+
+	for _, kw := range keywords {
+		re := regexp.MustCompile(kw)
+		matches := re.FindAllStringIndex(body, -1)
+		complexity += len(matches)
+	}
+
+	complexity -= countElseIfOverlap(body)
+
+	return complexity
+}
+
+func countElseIfOverlap(body string) int {
+	elseIfRe := regexp.MustCompile(`\belse\s+if\b`)
+	matches := elseIfRe.FindAllStringIndex(body, -1)
+	return len(matches)
+}
+
+func removeStringsAndComments(code string) string {
+	var result []rune
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	inLineComment := false
+	inBlockComment := false
+	runes := []rune(code)
+
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		if inBlockComment {
+			if ch == '*' && i+1 < len(runes) && runes[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+
+		if inSingle || inDouble || inBacktick {
+			if ch == '\\' && i+1 < len(runes) {
+				i++
+				continue
+			}
+			if inSingle && ch == '\'' {
+				inSingle = false
+			} else if inDouble && ch == '"' {
+				inDouble = false
+			} else if inBacktick && ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+
+		if ch == '/' && i+1 < len(runes) {
+			if runes[i+1] == '/' {
+				inLineComment = true
+				i++
+				continue
+			} else if runes[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+		}
+
+		if ch == '\'' {
+			inSingle = true
+		} else if ch == '"' {
+			inDouble = true
+		} else if ch == '`' {
+			inBacktick = true
+		} else {
+			result = append(result, ch)
+		}
+	}
+
+	return string(result)
+}
+
+func readFileContent(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}

@@ -28,6 +28,9 @@ type AnalyzerOptions struct {
 	ConfigFile    string
 	MinTokenLen   int
 	HighFanOut    int
+	Diff          string
+	DiffCommit1   string
+	DiffCommit2   string
 }
 
 type QualityGates struct {
@@ -203,4 +206,61 @@ type TrendMonth struct {
 
 type TrendReport struct {
 	Months []TrendMonth `json:"months"`
+}
+
+type ChangedFile struct {
+	FilePath   string `json:"file_path"`
+	ChangeType string `json:"change_type"`
+	OldPath    string `json:"old_path,omitempty"`
+}
+
+type FileComplexityDiff struct {
+	FilePath      string             `json:"file_path"`
+	OldComplexity int                `json:"old_complexity"`
+	NewComplexity int                `json:"new_complexity"`
+	Diff          int                `json:"diff"`
+	OldFunctions  []FunctionComplexity `json:"old_functions,omitempty"`
+	NewFunctions  []FunctionComplexity `json:"new_functions,omitempty"`
+	NewHighRisk   []FunctionComplexity `json:"new_high_risk,omitempty"`
+}
+
+type ComplexityDiffReport struct {
+	TotalDiff        int                  `json:"total_diff"`
+	ChangedFiles     int                  `json:"changed_files"`
+	ImprovedFiles    int                  `json:"improved_files"`
+	DegradedFiles    int                  `json:"degraded_files"`
+	FileDiffs        []FileComplexityDiff `json:"file_diffs"`
+	NewHighRiskCount int                  `json:"new_high_risk_count"`
+}
+
+type DuplicationDiffReport struct {
+	NewDuplicationRate   float64           `json:"new_duplication_rate"`
+	NewTotalTokens       int               `json:"new_total_tokens"`
+	NewDuplicateTokens   int               `json:"new_duplicate_tokens"`
+	NewBlockCount        int               `json:"new_block_count"`
+	NewTopDuplicates     []DuplicateBlock  `json:"new_top_duplicates"`
+}
+
+type DependencyDiffReport struct {
+	AddedEdges      []DependencyEdge `json:"added_edges"`
+	RemovedEdges    []DependencyEdge `json:"removed_edges"`
+	NewCycles       [][]string       `json:"new_cycles"`
+	NewCycleCount   int              `json:"new_cycle_count"`
+}
+
+type IncrementalReport struct {
+	RepoPath      string                  `json:"repo_path"`
+	GeneratedAt   time.Time               `json:"generated_at"`
+	Commit1       string                  `json:"commit1"`
+	Commit2       string                  `json:"commit2"`
+	ChangedFiles  []ChangedFile           `json:"changed_files"`
+	Complexity    *ComplexityDiffReport   `json:"complexity,omitempty"`
+	Duplication   *DuplicationDiffReport  `json:"duplication,omitempty"`
+	Dependency    *DependencyDiffReport   `json:"dependency,omitempty"`
+	QualityGates  *IncrementalGateResult  `json:"quality_gates,omitempty"`
+}
+
+type IncrementalGateResult struct {
+	Passed     bool     `json:"passed"`
+	Violations []string `json:"violations,omitempty"`
 }

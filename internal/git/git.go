@@ -390,3 +390,88 @@ func GetCurrentBranch(repoPath string) (string, error) {
 	}
 	return strings.TrimSpace(string(output)), nil
 }
+
+func GetDiffFiles(repoPath, commit1, commit2 string) ([]models.ChangedFile, error) {
+	cmd := exec.Command("git", "diff", "--name-status", "-M", commit1+".."+commit2)
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("获取diff文件列表失败: %w", err)
+	}
+
+	var files []models.ChangedFile
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		status := parts[0]
+		changeType := ""
+		oldPath := ""
+		newPath := ""
+
+		switch {
+		case strings.HasPrefix(status, "A"):
+			changeType = "added"
+			newPath = parts[1]
+		case strings.HasPrefix(status, "D"):
+			changeType = "deleted"
+			newPath = parts[1]
+		case strings.HasPrefix(status, "M"):
+			changeType = "modified"
+			newPath = parts[1]
+		case strings.HasPrefix(status, "R"):
+			changeType = "renamed"
+			if len(parts) >= 3 {
+				oldPath = parts[1]
+				newPath = parts[2]
+			}
+		case strings.HasPrefix(status, "C"):
+			changeType = "copied"
+			if len(parts) >= 3 {
+				oldPath = parts[1]
+				newPath = parts[2]
+			}
+		default:
+			changeType = "modified"
+			newPath = parts[1]
+		}
+
+		if newPath != "" {
+			files = append(files, models.ChangedFile{
+				FilePath:   newPath,
+				ChangeType: changeType,
+				OldPath:    oldPath,
+			})
+		}
+	}
+
+	return files, nil
+}
+
+func GetFileContent(repoPath, commit, filePath string) (string, error) {
+	cmd := exec.Command("git", "show", commit+":"+filePath)
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func GetFileContentAtCommit(repoPath, commit, filePath string) (string, error) {
+	return GetFileContent(repoPath, commit, filePath)
+}
+
+func CommitExists(repoPath, commit string) bool {
+	cmd := exec.Command("git", "cat-file", "-e", commit+"^{commit}")
+	cmd.Dir = repoPath
+	return cmd.Run() == nil
+}
