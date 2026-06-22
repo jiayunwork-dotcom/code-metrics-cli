@@ -26,7 +26,8 @@ venv/
 
 # Go
 /bin/
-/pkg/
+vendor/
+code-metrics
 
 # Rust
 /target/
