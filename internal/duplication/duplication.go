@@ -413,13 +413,17 @@ func findDuplicates(files []tokenizedFile, minLen int) []duplicateMatch {
 
 	hashMap := make(map[uint64][]occurrence)
 	windowLen := minLen
+	stepSize := minLen / 2
+	if stepSize < 1 {
+		stepSize = 1
+	}
 
 	for fileIdx, tf := range files {
 		if len(tf.TokenHashes) < windowLen {
 			continue
 		}
 
-		for i := 0; i <= len(tf.TokenHashes)-windowLen; i++ {
+		for i := 0; i <= len(tf.TokenHashes)-windowLen; i += stepSize {
 			h := hashWindow(tf.TokenHashes, i, windowLen)
 			line := tf.Tokens[i].Line
 			hashMap[h] = append(hashMap[h], occurrence{fileIdx, i, line})

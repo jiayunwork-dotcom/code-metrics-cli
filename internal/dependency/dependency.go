@@ -41,6 +41,47 @@ func (g *graph) addEdge(from, to string) {
 	g.edges[from] = append(g.edges[from], to)
 }
 
+func buildGoPackageMap(files []string, repoPath string) map[string]string {
+	pkgMap := make(map[string]string)
+
+	for _, file := range files {
+		if !strings.HasSuffix(file, ".go") {
+			continue
+		}
+		relPath, _ := strings.CutPrefix(file, repoPath+"/")
+		if relPath == file {
+			relPath = file
+		}
+
+		dir := filepath.Dir(relPath)
+		pkgMap[dir] = relPath
+	}
+
+	return pkgMap
+}
+
+func resolveGoImportPath(imp string, packageToFile map[string]string) string {
+	if imp == "" {
+		return imp
+	}
+
+	for pkgDir, filePath := range packageToFile {
+		if strings.HasSuffix(imp, pkgDir) {
+			return filepath.Dir(filePath) + "/" + filepath.Base(filePath)
+		}
+	}
+
+	parts := strings.Split(imp, "/")
+	for i := len(parts); i >= 1; i-- {
+		suffix := strings.Join(parts[len(parts)-i:], "/")
+		if filePath, ok := packageToFile[suffix]; ok {
+			return filepath.Dir(filePath) + "/" + filepath.Base(filePath)
+		}
+	}
+
+	return imp
+}
+
 func Analyze(files []string, repoPath string, highFanOut int, jobs int) *models.DependencyReport {
 	if len(files) == 0 {
 		return &models.DependencyReport{}
@@ -52,6 +93,7 @@ func Analyze(files []string, repoPath string, highFanOut int, jobs int) *models.
 
 	mu := sync.Mutex{}
 	relPathMap := make(map[string]string)
+	packageToFile := buildGoPackageMap(files, repoPath)
 
 	for _, file := range files {
 		file := file
@@ -62,7 +104,7 @@ func Analyze(files []string, repoPath string, highFanOut int, jobs int) *models.
 			}
 
 			lang := utils.GetLanguageByExt(file)
-			imports := parseImports(file, lang, repoPath, relPath)
+			imports := parseImports(file, lang, repoPath, relPath, packageToFile)
 
 			mu.Lock()
 			relPathMap[file] = relPath
@@ -128,7 +170,7 @@ func Analyze(files []string, repoPath string, highFanOut int, jobs int) *models.
 	}
 }
 
-func parseImports(file string, lang utils.Language, repoPath, relPath string) []string {
+func parseImports(file string, lang utils.Language, repoPath, relPath string, packageToFile map[string]string) []string {
 	content, err := os.Open(file)
 	if err != nil {
 		return nil
@@ -180,7 +222,7 @@ func parseImports(file string, lang utils.Language, repoPath, relPath string) []
 				}
 				re := regexp.MustCompile(`^\s*"([^"]+)"`)
 				if m := re.FindStringSubmatch(line); m != nil && len(m) >= 2 {
-					imp := resolveImportPath(m[1], lang, file, repoPath, relPath)
+					imp := resolveImportPath(m[1], lang, file, repoPath, relPath, packageToFile)
 					if isValidImport(imp) {
 						imports = append(imports, imp)
 					}
@@ -189,7 +231,7 @@ func parseImports(file string, lang utils.Language, repoPath, relPath string) []
 			}
 			re := regexp.MustCompile(`^\s*import\s+"([^"]+)"`)
 			if m := re.FindStringSubmatch(line); m != nil && len(m) >= 2 {
-				imp := resolveImportPath(m[1], lang, file, repoPath, relPath)
+				imp := resolveImportPath(m[1], lang, file, repoPath, relPath, packageToFile)
 				if isValidImport(imp) {
 					imports = append(imports, imp)
 				}
@@ -197,7 +239,7 @@ func parseImports(file string, lang utils.Language, repoPath, relPath string) []
 			continue
 		}
 
-		imp := matchImport(line, lang, file, repoPath, relPath)
+		imp := matchImport(line, lang, file, repoPath, relPath, packageToFile)
 		if imp != "" && isValidImport(imp) {
 			imports = append(imports, imp)
 		}
@@ -241,7 +283,7 @@ func isValidImport(imp string) bool {
 	return true
 }
 
-func matchImport(line string, lang utils.Language, file, repoPath, relPath string) string {
+func matchImport(line string, lang utils.Language, file, repoPath, relPath string, packageToFile map[string]string) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return ""
@@ -278,21 +320,21 @@ func matchImport(line string, lang utils.Language, file, repoPath, relPath strin
 
 	if re != nil {
 		if m := re.FindStringSubmatch(line); m != nil && len(m) >= 2 {
-			return resolveImportPath(m[1], lang, file, repoPath, relPath)
+			return resolveImportPath(m[1], lang, file, repoPath, relPath, packageToFile)
 		}
 	}
 
 	return ""
 }
 
-func resolveImportPath(imp string, lang utils.Language, file, repoPath, relPath string) string {
+func resolveImportPath(imp string, lang utils.Language, file, repoPath, relPath string, packageToFile map[string]string) string {
 	if imp == "" {
 		return ""
 	}
 
 	switch lang {
 	case utils.LangGo:
-		return imp
+		return resolveGoImportPath(imp, packageToFile)
 	case utils.LangPython:
 		return resolvePythonImport(imp, file, repoPath, relPath)
 	case utils.LangJavaScript, utils.LangTypeScript:

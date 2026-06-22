@@ -111,7 +111,9 @@ func countLines(path string) (code, comment, blank int) {
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	inBlockComment := false
-	commentStart, commentEnd := getCommentMarkers(lang)
+	inString := false
+	stringDelim := rune(0)
+	lineCommentStart, blockCommentStart, blockCommentEnd := getCommentMarkers(lang)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -122,45 +124,79 @@ func countLines(path string) (code, comment, blank int) {
 			continue
 		}
 
-		isCommentLine := false
-		hasCode := false
+		lineHasComment := false
+		lineIsOnlyComment := true
 
-		if commentEnd != "" {
+		runes := []rune(line)
+		for i := 0; i < len(runes); i++ {
+			ch := runes[i]
+
 			if inBlockComment {
-				isCommentLine = true
-				if strings.Contains(line, commentEnd) {
-					inBlockComment = false
-					after := line[strings.Index(line, commentEnd)+len(commentEnd):]
-					if strings.TrimSpace(after) != "" {
-						hasCode = true
+				lineHasComment = true
+				if blockCommentEnd != "" && i+len(blockCommentEnd) <= len(runes) {
+					if string(runes[i:i+len(blockCommentEnd)]) == blockCommentEnd {
+						inBlockComment = false
+						i += len(blockCommentEnd) - 1
 					}
 				}
-			} else if strings.HasPrefix(trimmed, commentStart) && commentStart != "" {
-				isCommentLine = true
-			} else if strings.Contains(line, commentStart) {
-				idx := strings.Index(line, commentStart)
-				if !strings.Contains(line[:idx], "string_literal_placeholder") {
-					before := strings.TrimSpace(line[:idx])
-					if before == "" {
-						isCommentLine = true
-					} else {
-						hasCode = true
+				continue
+			}
+
+			if inString {
+				lineIsOnlyComment = false
+				if ch == '\\' && i+1 < len(runes) {
+					i++
+					continue
+				}
+				if ch == stringDelim {
+					inString = false
+				}
+				continue
+			}
+
+			if ch == '"' || ch == '\'' || ch == '`' {
+				inString = true
+				stringDelim = ch
+				lineIsOnlyComment = false
+				continue
+			}
+
+			if blockCommentStart != "" && i+len(blockCommentStart) <= len(runes) {
+				if string(runes[i:i+len(blockCommentStart)]) == blockCommentStart {
+					lineHasComment = true
+					remaining := strings.TrimSpace(string(runes[i:]))
+					if strings.TrimSpace(string(runes[:i])) != "" {
+						lineIsOnlyComment = false
 					}
-					if strings.Contains(line[idx:], commentEnd) {
-					} else {
+					if blockCommentEnd != "" && strings.Contains(remaining, blockCommentEnd) {
+						afterIdx := strings.Index(remaining, blockCommentEnd) + len(blockCommentEnd)
+						after := strings.TrimSpace(remaining[afterIdx:])
+						if after != "" {
+							lineIsOnlyComment = false
+						}
+					} else if blockCommentEnd != "" {
 						inBlockComment = true
 					}
+					break
 				}
 			}
-		} else if commentStart != "" {
-			if strings.HasPrefix(trimmed, commentStart) {
-				isCommentLine = true
-			} else if strings.Contains(line, commentStart) {
-				hasCode = true
+
+			if lineCommentStart != "" && i+len(lineCommentStart) <= len(runes) {
+				if string(runes[i:i+len(lineCommentStart)]) == lineCommentStart {
+					lineHasComment = true
+					if strings.TrimSpace(string(runes[:i])) != "" {
+						lineIsOnlyComment = false
+					}
+					break
+				}
+			}
+
+			if !strings.ContainsRune(" \t\r\n", ch) {
+				lineIsOnlyComment = false
 			}
 		}
 
-		if isCommentLine && !hasCode {
+		if lineIsOnlyComment && lineHasComment {
 			comment++
 		} else {
 			code++
@@ -170,14 +206,14 @@ func countLines(path string) (code, comment, blank int) {
 	return code, comment, blank
 }
 
-func getCommentMarkers(lang utils.Language) (lineStart, blockEnd string) {
+func getCommentMarkers(lang utils.Language) (lineStart, blockStart, blockEnd string) {
 	switch lang {
 	case utils.LangGo, utils.LangJavaScript, utils.LangTypeScript,
 		utils.LangJava, utils.LangRust, utils.LangC, utils.LangCpp:
-		return "//", "*/"
+		return "//", "/*", "*/"
 	case utils.LangPython:
-		return "#", ""
+		return "#", "\"\"\"", "\"\"\""
 	default:
-		return "", ""
+		return "", "", ""
 	}
 }
