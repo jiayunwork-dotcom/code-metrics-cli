@@ -13,6 +13,7 @@ import (
 	"github.com/code-metrics/cli/internal/git"
 	"github.com/code-metrics/cli/internal/metrics"
 	"github.com/code-metrics/cli/internal/output"
+	"github.com/code-metrics/cli/internal/rules"
 	"github.com/code-metrics/cli/internal/scoring"
 	"github.com/code-metrics/cli/internal/trend"
 	"github.com/code-metrics/cli/pkg/models"
@@ -44,6 +45,12 @@ func Run(opts *models.AnalyzerOptions) {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "警告: 配置文件加载失败: %v\n", err)
+	}
+
+	rulesEngine, err := rules.NewEngine(opts.RulesFile, absPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 规则文件解析失败: %v\n", err)
+		os.Exit(1)
 	}
 
 	startTime := time.Now()
@@ -141,6 +148,8 @@ func Run(opts *models.AnalyzerOptions) {
 	}
 
 	exitCode := 0
+	qualityGateFailed := false
+
 	if opts.CIMode {
 		passed, violations := config.CheckQualityGates(report, cfg.QualityGates)
 		report.QualityGates = &models.QualityGateResult{
@@ -148,8 +157,18 @@ func Run(opts *models.AnalyzerOptions) {
 			Violations: violations,
 		}
 		if !passed {
-			exitCode = 1
+			qualityGateFailed = true
 		}
+	}
+
+	if rulesEngine != nil && rulesEngine.IsEnabled() {
+		report.CustomRules = rulesEngine.Evaluate(report)
+	}
+
+	if report.CustomRules != nil && report.CustomRules.HasErrors {
+		exitCode = 3
+	} else if qualityGateFailed {
+		exitCode = 1
 	}
 
 	output.Write(report, opts, cfg)

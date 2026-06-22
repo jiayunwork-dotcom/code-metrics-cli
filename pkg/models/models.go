@@ -31,6 +31,92 @@ type AnalyzerOptions struct {
 	Diff          string
 	DiffCommit1   string
 	DiffCommit2   string
+	RulesFile     string
+}
+
+type Severity string
+
+const (
+	SeverityError   Severity = "error"
+	SeverityWarning Severity = "warning"
+	SeverityInfo    Severity = "info"
+)
+
+type RuleStatus string
+
+const (
+	RuleStatusPassed RuleStatus = "passed"
+	RuleStatusFailed RuleStatus = "failed"
+	RuleStatusSkipped RuleStatus = "skipped"
+)
+
+type LogicOperator string
+
+const (
+	LogicAND LogicOperator = "AND"
+	LogicOR  LogicOperator = "OR"
+)
+
+type Rule struct {
+	Name      string   `yaml:"name" json:"name"`
+	Condition string   `yaml:"condition" json:"condition"`
+	Severity  Severity `yaml:"severity" json:"severity"`
+	Message   string   `yaml:"message,omitempty" json:"message,omitempty"`
+}
+
+type RuleGroup struct {
+	Name     string        `yaml:"name" json:"name"`
+	Logic    LogicOperator `yaml:"logic,omitempty" json:"logic,omitempty"`
+	Rules    []Rule        `yaml:"rules" json:"rules"`
+}
+
+type RulesConfig struct {
+	Extends string      `yaml:"extends,omitempty" json:"extends,omitempty"`
+	Groups  []RuleGroup `yaml:"groups" json:"groups"`
+}
+
+type RuleResult struct {
+	RuleName   string     `json:"rule_name"`
+	GroupName  string     `json:"group_name"`
+	Status     RuleStatus `json:"status"`
+	Severity   Severity   `json:"severity"`
+	Message    string     `json:"message,omitempty"`
+	Actual     string     `json:"actual,omitempty"`
+	SkipReason string     `json:"skip_reason,omitempty"`
+}
+
+type GroupResult struct {
+	GroupName string       `json:"group_name"`
+	Logic     LogicOperator `json:"logic"`
+	Passed    bool         `json:"passed"`
+	Results   []RuleResult `json:"results"`
+}
+
+type CustomRulesResult struct {
+	Enabled      bool          `json:"enabled"`
+	RulesFile    string        `json:"rules_file,omitempty"`
+	TotalRules   int           `json:"total_rules"`
+	PassedCount  int           `json:"passed_count"`
+	FailedCount  int           `json:"failed_count"`
+	SkippedCount int           `json:"skipped_count"`
+	HasErrors    bool          `json:"has_errors"`
+	Groups       []GroupResult `json:"groups,omitempty"`
+	ParseError   string        `json:"parse_error,omitempty"`
+}
+
+type Report struct {
+	RepoPath      string              `json:"repo_path"`
+	GeneratedAt   time.Time           `json:"generated_at"`
+	Metrics       *MetricsReport      `json:"metrics,omitempty"`
+	Complexity    *ComplexityReport   `json:"complexity,omitempty"`
+	Duplication   *DuplicationReport  `json:"duplication,omitempty"`
+	Dependency    *DependencyReport   `json:"dependency,omitempty"`
+	GitHotspots   *GitHotspotReport   `json:"git_hotspots,omitempty"`
+	Contributors  *ContributorReport  `json:"contributors,omitempty"`
+	TechDebt      *TechDebtReport     `json:"tech_debt,omitempty"`
+	Trend         *TrendReport        `json:"trend,omitempty"`
+	QualityGates  *QualityGateResult  `json:"quality_gates,omitempty"`
+	CustomRules   *CustomRulesResult  `json:"custom_rules,omitempty"`
 }
 
 type QualityGates struct {
@@ -46,20 +132,6 @@ type Config struct {
 type QualityGateResult struct {
 	Passed     bool     `json:"passed"`
 	Violations []string `json:"violations,omitempty"`
-}
-
-type Report struct {
-	RepoPath      string             `json:"repo_path"`
-	GeneratedAt   time.Time          `json:"generated_at"`
-	Metrics       *MetricsReport     `json:"metrics,omitempty"`
-	Complexity    *ComplexityReport  `json:"complexity,omitempty"`
-	Duplication   *DuplicationReport `json:"duplication,omitempty"`
-	Dependency    *DependencyReport  `json:"dependency,omitempty"`
-	GitHotspots   *GitHotspotReport  `json:"git_hotspots,omitempty"`
-	Contributors  *ContributorReport `json:"contributors,omitempty"`
-	TechDebt      *TechDebtReport    `json:"tech_debt,omitempty"`
-	Trend         *TrendReport       `json:"trend,omitempty"`
-	QualityGates  *QualityGateResult `json:"quality_gates,omitempty"`
 }
 
 type LanguageMetrics struct {
