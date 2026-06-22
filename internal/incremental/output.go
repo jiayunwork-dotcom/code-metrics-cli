@@ -10,6 +10,86 @@ import (
 	"github.com/code-metrics/cli/pkg/utils"
 )
 
+func printCustomRules(custom *models.CustomRulesResult) {
+	fmt.Println()
+	fmt.Println(utils.Bold(utils.BrightYellow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")))
+	fmt.Println(utils.Bold(utils.BrightYellow("自定义规则评估")))
+	fmt.Println(utils.Bold(utils.BrightYellow("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")))
+	fmt.Println()
+
+	if custom.RulesFile != "" {
+		fmt.Printf("规则文件: %s\n", utils.Cyan(custom.RulesFile))
+		fmt.Println()
+	}
+
+	fmt.Printf("总规则数: %d, 通过: %s, 不通过: %s, 跳过: %s\n\n",
+		custom.TotalRules,
+		utils.Green(fmt.Sprintf("%d", custom.PassedCount)),
+		utils.Red(fmt.Sprintf("%d", custom.FailedCount)),
+		utils.Yellow(fmt.Sprintf("%d", custom.SkippedCount)),
+	)
+
+	for _, group := range custom.Groups {
+		groupStatus := utils.Green("✓")
+		if !group.Passed {
+			groupStatus = utils.Red("✗")
+		}
+		logicStr := "AND"
+		if group.Logic == models.LogicOR {
+			logicStr = "OR"
+		}
+		fmt.Printf("%s %s [%s]\n", groupStatus, utils.Bold(group.GroupName), logicStr)
+
+		for _, r := range group.Results {
+			var statusStr string
+			var colorFunc func(string) string
+
+			switch r.Status {
+			case models.RuleStatusPassed:
+				statusStr = "通过"
+				colorFunc = utils.Green
+			case models.RuleStatusFailed:
+				statusStr = "不通过"
+				colorFunc = utils.Red
+			case models.RuleStatusSkipped:
+				statusStr = "跳过"
+				colorFunc = utils.Yellow
+			}
+
+			severityStr := ""
+			switch r.Severity {
+			case models.SeverityError:
+				severityStr = " [error]"
+			case models.SeverityWarning:
+				severityStr = " [warning]"
+			case models.SeverityInfo:
+				severityStr = " [info]"
+			}
+
+			fmt.Printf("  %s %s%s - %s",
+				colorFunc("●"),
+				r.RuleName,
+				severityStr,
+				statusStr,
+			)
+
+			if r.Actual != "" {
+				fmt.Printf(" (实际值: %s)", r.Actual)
+			}
+
+			if r.Message != "" && r.Status == models.RuleStatusFailed {
+				fmt.Printf(" - %s", r.Message)
+			}
+
+			if r.SkipReason != "" {
+				fmt.Printf(" (%s)", r.SkipReason)
+			}
+			fmt.Println()
+		}
+		fmt.Println()
+	}
+}
+
 func writeOutput(report *models.IncrementalReport, opts *models.AnalyzerOptions, cfg *models.Config) {
 	switch opts.Format {
 	case "json":
@@ -57,6 +137,10 @@ func writeIncrementalTerminal(report *models.IncrementalReport, opts *models.Ana
 				fmt.Printf("  - %s\n", v)
 			}
 		}
+	}
+
+	if report.CustomRules != nil && report.CustomRules.Enabled {
+		printCustomRules(report.CustomRules)
 	}
 }
 

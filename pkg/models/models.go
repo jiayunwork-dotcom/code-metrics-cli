@@ -42,6 +42,13 @@ const (
 	SeverityInfo    Severity = "info"
 )
 
+type RuleMode string
+
+const (
+	RuleModeFull        RuleMode = "full"
+	RuleModeIncremental RuleMode = "incremental"
+)
+
 type RuleStatus string
 
 const (
@@ -62,6 +69,7 @@ type Rule struct {
 	Condition string   `yaml:"condition" json:"condition"`
 	Severity  Severity `yaml:"severity" json:"severity"`
 	Message   string   `yaml:"message,omitempty" json:"message,omitempty"`
+	Mode      RuleMode `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
 type RuleGroup struct {
@@ -330,6 +338,7 @@ type IncrementalReport struct {
 	Duplication   *DuplicationDiffReport  `json:"duplication,omitempty"`
 	Dependency    *DependencyDiffReport   `json:"dependency,omitempty"`
 	QualityGates  *IncrementalGateResult  `json:"quality_gates,omitempty"`
+	CustomRules   *CustomRulesResult      `json:"custom_rules,omitempty"`
 }
 
 type IncrementalGateResult struct {

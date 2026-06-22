@@ -7,6 +7,7 @@ import (
 
 	"github.com/code-metrics/cli/internal/config"
 	"github.com/code-metrics/cli/internal/git"
+	"github.com/code-metrics/cli/internal/rules"
 	"github.com/code-metrics/cli/pkg/models"
 	"github.com/code-metrics/cli/pkg/utils"
 )
@@ -34,6 +35,12 @@ func Run(opts *models.AnalyzerOptions) {
 		fmt.Fprintf(os.Stderr, "警告: 配置文件加载失败: %v\n", err)
 	}
 
+	rulesEngine, err := rules.NewEngine(opts.RulesFile, opts.RepoPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 规则文件解析失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	report := &models.IncrementalReport{
 		RepoPath:    opts.RepoPath,
 		GeneratedAt: time.Now(),
@@ -57,6 +64,9 @@ func Run(opts *models.AnalyzerOptions) {
 	if len(report.ChangedFiles) == 0 {
 		if !opts.CIMode {
 			fmt.Fprintf(os.Stderr, "警告: 没有检测到源代码文件变更\n")
+		}
+		if rulesEngine != nil && rulesEngine.IsEnabled() {
+			report.CustomRules = rulesEngine.EvaluateIncremental(report)
 		}
 		writeOutput(report, opts, cfg)
 		os.Exit(0)
@@ -92,6 +102,7 @@ func Run(opts *models.AnalyzerOptions) {
 	}
 
 	exitCode := 0
+	qualityGateFailed := false
 	if opts.CIMode {
 		passed, violations := CheckIncrementalGates(report, cfg.QualityGates)
 		report.QualityGates = &models.IncrementalGateResult{
@@ -99,8 +110,18 @@ func Run(opts *models.AnalyzerOptions) {
 			Violations: violations,
 		}
 		if !passed {
-			exitCode = 2
+			qualityGateFailed = true
 		}
+	}
+
+	if rulesEngine != nil && rulesEngine.IsEnabled() {
+		report.CustomRules = rulesEngine.EvaluateIncremental(report)
+	}
+
+	if report.CustomRules != nil && report.CustomRules.HasErrors {
+		exitCode = 3
+	} else if qualityGateFailed {
+		exitCode = 2
 	}
 
 	writeOutput(report, opts, cfg)
